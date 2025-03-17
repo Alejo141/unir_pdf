@@ -1,3 +1,2 @@
 streamlit
-io
-PyPDF2
+pypdf2
