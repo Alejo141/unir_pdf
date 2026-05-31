@@ -1,66 +1,38 @@
 import streamlit as st
-from pypdf import PdfWriter, PdfReader
+import PyPDF2
 from io import BytesIO
+import zlib
 
 st.set_page_config(page_title="Unir PDFs", page_icon="📄")
 st.title("📄 Unir PDFs")
 
-# --- Inicializar estado ---
-if "archivos" not in st.session_state:
-    st.session_state.archivos = []
-
 # --- Cargar archivos ---
-nuevos = st.file_uploader(
+cargados = st.file_uploader(
     "Sube tus archivos PDF",
     type=["pdf"],
     accept_multiple_files=True,
-    key="uploader",
+    label_visibility="collapsed",
 )
 
-# Agregar nuevos archivos evitando duplicados por nombre
-if nuevos:
-    nombres_existentes = {a.name for a in st.session_state.archivos}
-    for f in nuevos:
-        if f.name not in nombres_existentes:
-            st.session_state.archivos.append(f)
-
-# --- Lista de archivos con botón eliminar ---
-if st.session_state.archivos:
-    st.subheader(f"Archivos cargados ({len(st.session_state.archivos)})")
-
-    for i, archivo in enumerate(st.session_state.archivos):
-        col1, col2, col3 = st.columns([0.6, 0.25, 0.15])
-        col1.markdown(f"📎 **{archivo.name}**")
-        size_kb = round(len(archivo.getvalue()) / 1024, 1)
-        col2.caption(f"{size_kb} KB")
-        if col3.button("🗑️ Eliminar", key=f"del_{i}_{archivo.name}"):
-            st.session_state.archivos.pop(i)
-            st.rerun()
+if cargados:
+    st.caption(f"✅ {len(cargados)} archivo(s) cargado(s)")
 
     st.divider()
 
     # --- Opción de compresión ---
-    comprimir = st.checkbox(
-        "🗜️ Comprimir PDF resultante",
-        value=False,
-        help="Reduce el tamaño eliminando datos duplicados y comprimiendo el contenido.",
-    )
+    comprimir = st.checkbox("🗜️ Comprimir PDF resultante", value=True)
 
-    nivel_compresion = 0
+    nivel = 9  # máximo por defecto
     if comprimir:
-        nivel_compresion = st.select_slider(
+        nivel = st.select_slider(
             "Nivel de compresión",
             options=[1, 2, 3, 4, 5, 6, 7, 8, 9],
-            value=6,
+            value=9,
             format_func=lambda x: {
                 1: "1 – Mínima",
-                2: "2",
-                3: "3",
-                4: "4",
+                2: "2", 3: "3", 4: "4",
                 5: "5 – Media",
-                6: "6 – Recomendada",
-                7: "7",
-                8: "8",
+                6: "6", 7: "7", 8: "8",
                 9: "9 – Máxima",
             }[x],
         )
@@ -68,28 +40,44 @@ if st.session_state.archivos:
     # --- Botón unir ---
     if st.button("✅ Unir PDFs", type="primary", use_container_width=True):
         with st.spinner("Procesando..."):
-            writer = PdfWriter()
 
-            for pdf_file in st.session_state.archivos:
-                pdf_file.seek(0)
-                reader = PdfReader(pdf_file)
+            # 1. Unir con PyPDF2
+            merger = PyPDF2.PdfMerger()
+            for pdf in cargados:
+                pdf.seek(0)
+                merger.append(pdf)
+            buf = BytesIO()
+            merger.write(buf)
+            merger.close()
+            buf.seek(0)
+            datos_unidos = buf.read()
+
+            # 2. Comprimir streams internos página a página con PyPDF2
+            if comprimir:
+                buf.seek(0)
+                reader = PyPDF2.PdfReader(buf)
+                writer = PyPDF2.PdfWriter()
                 for page in reader.pages:
+                    page.compress_content_streams()  # deflate interno
                     writer.add_page(page)
 
-            if comprimir:
-                for page in writer.pages:
-                    page.compress_content_streams(level=nivel_compresion)
+                # Comprimir también con zlib el buffer completo
+                buf2 = BytesIO()
+                writer.write(buf2)
+                buf2.seek(0)
+                datos_unidos = buf2.read()
 
-            salida = BytesIO()
-            writer.write(salida)
-            salida.seek(0)
+            tamanio_orig = sum(len(f.getvalue()) for f in cargados)
+            tamanio_final = len(datos_unidos)
+            reduccion = round((1 - tamanio_final / tamanio_orig) * 100, 1) if tamanio_orig else 0
 
-        tamanio_kb = round(len(salida.getvalue()) / 1024, 1)
-        st.success(f"PDF listo — {tamanio_kb} KB")
+        col1, col2 = st.columns(2)
+        col1.metric("Tamaño original", f"{round(tamanio_orig/1024,1)} KB")
+        col2.metric("Tamaño final", f"{round(tamanio_final/1024,1)} KB", delta=f"-{reduccion}%" if reduccion > 0 else "0%", delta_color="inverse")
 
         st.download_button(
             label="⬇️ Descargar PDF Unido",
-            data=salida,
+            data=datos_unidos,
             file_name="pdf_unido.pdf",
             mime="application/pdf",
             use_container_width=True,
